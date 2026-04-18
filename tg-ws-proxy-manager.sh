@@ -71,6 +71,10 @@ else
     #ARCH="$(uname -m)"
 fi
 
+gen_secret() {
+    head -c16 /dev/urandom | hexdump -e '16/1 "%02x"'
+}
+
 # Скачиваем Cloudflare домены Flowseal
 cf_decode_domains() {
     local content decoded_list domain decoded
@@ -80,7 +84,7 @@ cf_decode_domains() {
     if [ -z "${content}" ]; then
         echo -e "Ошибка: не удалось скачать список доменов\n" >&2
         PAUSE
-        return 1
+        return
     fi
 
     # Декодируем в обратном порядке
@@ -146,12 +150,6 @@ cf_decode_single_domain() {
     echo "${decoded}.co.uk"
 }
 
-# Получаем latest версию через api Github
-get_latest_tag() {
-    local repo=$1
-    curl ${CURL_OPTS} https://api.github.com/repos/${repo}/releases/latest | grep '"tag_name"' | cut -d '"' -f4
-}
-
 # Получаем secret из init файла
 get_current_secret() {
     local version="$1"
@@ -160,9 +158,11 @@ get_current_secret() {
     case "${version}" in
         rs)
             init_path="${INIT_PATH_RS}"
+            [ -f "${init_path}" ] && sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{32\}\).*/\1/p' ${init_path} || true
             ;;
         go)
             init_path="${INIT_PATH_GO}"
+            [ -f "${init_path}" ] && sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{34\}\).*/\1/p' ${init_path} || true
             ;;
         *)
             echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}"
@@ -170,10 +170,6 @@ get_current_secret() {
             return 1
             ;;
     esac
-
-    if [ -f "${init_path}" ]; then
-        sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{32\}\).*/\1/p' ${init_path} || true
-    fi
 }
 
 # Получаем домены Cloudflare из init файла
@@ -208,9 +204,11 @@ get_cf_priority() {
     case "${version}" in
         rs)
             init_path="${INIT_PATH_RS}"
+            [ -f "${init_path}" ] && grep -q -- "--cf-priority" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         go)
             init_path="${INIT_PATH_GO}"
+            [ -f "${init_path}" ] && grep -q -- "--cf-proxy-first" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         *)
             echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}"
@@ -218,14 +216,6 @@ get_cf_priority() {
             return 1
             ;;
     esac
-
-    if [ "${version}" = "rs" ] && grep -q -- "--cf-priority" ${init_path} 2> /dev/null; then
-        echo "1"
-    elif [ "${version}" = "go" ] && grep -q -- "--cf-proxy-first" ${init_path} 2> /dev/null; then
-        echo "1"
-    else
-        echo "0"
-    fi
 }
 
 # Определяем архитектуру
@@ -308,7 +298,7 @@ EOF
 # Настройка Cloudflare proxy
 configure_cloudflare() {
     local version="$1"
-    local display_name bin_name init_path base_cmd cf_flag priority_flag cf_domain secret
+    local display_name bin_name init_path base_cmd cf_flag priority_flag cf_domain secret mtproto_mode mtproto_flag
     local cf_priority="0"
     local default_cf_domains="$(cf_decode_domains)"
     local current_cf_domain="$(get_cf_domain "${version}")"
@@ -322,6 +312,7 @@ configure_cloudflare() {
             base_cmd="${BASE_CMD_RS}"
             cf_flag="--cf-domain"
             priority_flag="--cf-priority"
+            mtproto_mode="${MTPROTO_RS}"
             ;;
         go)
             display_name="[Go]"
@@ -330,6 +321,8 @@ configure_cloudflare() {
             base_cmd="${BASE_CMD_GO}"
             cf_flag="--cf-proxy --cf-domain"
             priority_flag="--cf-proxy-first"
+            mtproto_mode="${MTPROTO_GO}"
+            mtproto_flag="--mode mtproto"
             ;;
         *)
             echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}"
@@ -342,7 +335,7 @@ configure_cloudflare() {
 
     show_header
 
-    echo -e "\n${MAGENTA}Настройка Cloudflare Proxy ${CYAN}${display_name}${NC}"
+    echo -e "\n${MAGENTA}Настройка Cloudflare Proxy ${CYAN}${display_name}${NC}\n"
 
     if [ -n "${current_cf_domain}" ]; then
         echo -e "${YELLOW}Cтатус:${NC} ${GREEN}Включен${NC}"
@@ -354,8 +347,10 @@ configure_cloudflare() {
 
     echo -e "\n${CYAN}1)${NC}${BOLD} Включить с доменами по умолчанию${NC}"
     echo -e "${CYAN}2)${NC}${BOLD} Включить со своими доменами${NC}"
-    echo -e "${CYAN}3)${NC}${BOLD} $( [ "${current_prority}" = "1" ] && echo "Выключить" || echo "Включить" ) приоритет Cloudflare${NC}"
-    echo -e "${CYAN}4)${YELLOW} Выключить Cloudflare Proxy${NC}"
+    if [ -n "${current_cf_domain}" ]; then
+        echo -e "${CYAN}3)${NC}${BOLD} $( [ "${current_prority}" = "1" ] && echo "Выключить" || echo "Включить" ) приоритет Cloudflare${NC}"
+        echo -e "${CYAN}4)${YELLOW} Выключить Cloudflare Proxy${NC}"
+    fi
     echo -e "\n${CYAN}Enter) Отмена${NC}\n"
     echo -en "${YELLOW}Выбери действие: ${NC}"
     read -r choice
@@ -369,9 +364,9 @@ configure_cloudflare() {
                     cf_priority="${current_prority}"
                 fi
                 cf_domain="${default_cf_domains}"
-                echo -e "${GREEN}Выбраны домены по умолчанию${NC}"
+                echo -e "\n${GREEN}Выбраны домены по умолчанию${NC}"
             else
-                echo -e "${RED}Не удалось скачать домены по умолчанию${NC}"
+                echo -e "\n${RED}Не удалось скачать домены по умолчанию${NC}"
                 PAUSE
                 return
             fi
@@ -382,7 +377,7 @@ configure_cloudflare() {
             input=$(echo "${input}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
             if [ -z "${input}" ]; then
-                echo -e "${RED}Домен не введен${NC}"
+                echo -e "\n${RED}Домен не введен${NC}"
                 PAUSE
                 return
             fi
@@ -394,11 +389,11 @@ configure_cloudflare() {
             fi
 
             cf_domain="${input}"
-            echo -e "${GREEN}Домены сохранены${NC}"
+            echo -e "\n${GREEN}Домены сохранены${NC}"
             ;;
         3)
             if [ -z "${current_cf_domain}" ]; then
-                echo -e "${RED}Сначала включи Cloudflare Proxy (пункт 1 или 2)${NC}"
+                echo -e "\n${RED}Сначала включи Cloudflare Proxy (пункт 1 или 2)${NC}"
                 PAUSE
                 return
             fi
@@ -410,22 +405,26 @@ configure_cloudflare() {
             fi
 
             cf_domain="${current_cf_domain}"
-            echo -e "${GREEN}Приоритет Cloudflare $( [ "${cf_priority}" = "1" ] && echo "включен" || echo "выключен" )${NC}"
+            echo -e "\n${GREEN}Приоритет Cloudflare $( [ "${cf_priority}" = "1" ] && echo "включен" || echo "выключен" )${NC}"
             ;;
         4)
             cf_domain=""
             cf_priority="0"
-            echo -e "${GREEN}Cloudflare Proxy отключен${NC}"
+            echo -e "\n${GREEN}Cloudflare Proxy отключен${NC}"
             ;;
         *)
             return
             ;;
     esac
 
-    if [ "${version}" = "rs" ]; then
+    if [ "${mtproto_mode}" = "1" ]; then
         secret="$(get_current_secret "${version}")"
-        [ -z "${secret}" ] && secret="$(head -c16 /dev/urandom | hexdump -e '16/1 "%02x"')"
-        full_cmd="${full_cmd} ${secret}"
+
+        if [ "${version}" = "go" ]; then
+            [ -n "${secret}" ] && full_cmd="${full_cmd} ${mtproto_flag} --secret ${secret}"
+        else
+            full_cmd="${full_cmd} ${secret}"
+        fi
     fi
 
     if [ -n "${cf_domain}" ]; then
@@ -436,11 +435,12 @@ configure_cloudflare() {
     create_init_script "${init_path}" "${full_cmd}"
 
     "${init_path}" restart > /dev/null 2>&1
+    sleep 1
 
     if pidof "${bin_name}" > /dev/null 2>&1; then
-        echo -e "${GREEN}Настройки Cloudflare успешно применены и сервис перезапущен${NC}"
+        echo -e "\n${GREEN}Настройки Cloudflare успешно применены и сервис перезапущен${NC}"
     else
-        echo -e "${RED}Не удалось запустить сервис после применения настроек${NC}"
+        echo -e "\n${RED}Не удалось запустить сервис после применения настроек${NC}"
     fi
 
     PAUSE
@@ -451,10 +451,20 @@ configure_cloudflare() {
 install_or_update_tgws() {
     local version="$1"
     local is_update="${2:-0}"
-    local display_name repo bin_name bin_path init_path base_cmd cf_flag priority_flag tmp_archive tmp_dir tmp_bin cf_domain secret
+    local display_name repo bin_name bin_path init_path base_cmd cf_flag priority_flag mtproto_mode mtproto_flag tmp_archive tmp_dir tmp_bin cf_domain
+    local secret=""
     local cf_priority="0"
     local default_cf_domains="$(cf_decode_domains)"
-    local arch_file="$(get_arch "${version}")" || return 1
+    local arch_file="$(get_arch "${version}")"
+
+    local releases_json
+    local release_list
+    local latest_stable=""
+    local i=1
+    local input_release
+    local selected_tag
+
+    local tag1 tag2 tag3 tag4 tag5 tag6 tag7 tag8 tag9 tag10
 
     case "$version" in
         rs)
@@ -466,6 +476,7 @@ install_or_update_tgws() {
             tmp_archive="${TMP_ARCHIVE_RS}"
             tmp_dir="${TMP_DIR_RS}"
             base_cmd="${BASE_CMD_RS}"
+            mtproto_mode="${MTPROTO_RS}"
             cf_flag="--cf-domain"
             priority_flag="--cf-priority"
             ;;
@@ -477,6 +488,8 @@ install_or_update_tgws() {
             init_path="${INIT_PATH_GO}"
             tmp_bin="${TMP_BIN_GO}"
             base_cmd="${BASE_CMD_GO}"
+            mtproto_mode="${MTPROTO_GO}"
+            mtproto_flag="--mode mtproto"
             cf_flag="--cf-proxy --cf-domain"
             priority_flag="--cf-proxy-first"
             ;;
@@ -487,26 +500,141 @@ install_or_update_tgws() {
             ;;
     esac
 
-    local latest_tag="$(get_latest_tag "${repo}")"
-    local download_url="https://github.com/${repo}/releases/download/${latest_tag}/${arch_file}"
+    #local latest_tag="$(get_latest_tag "${repo}")"
     local full_cmd="${base_cmd}"
 
-    if [ "${is_update}" = "1" ]; then
-        echo -e "\n${MAGENTA}Обновление TG WS Proxy ${CYAN}${display_name}${NC}"
-    else
-        echo -e "\n${MAGENTA}Установка TG WS Proxy ${CYAN}${display_name}${NC}"
-    fi
+    clear
+    show_header
 
     if [ "${is_update}" = "1" ]; then
-        if [ "${version}" = "rs" ]; then
+        echo -e " \n${MAGENTA}Обновление TG WS Proxy ${CYAN}${display_name}${NC}"
+    else
+        echo -e " \n${MAGENTA}Установка TG WS Proxy ${CYAN}${display_name}${NC}"
+    fi
+
+    releases_json=$(curl ${CURL_OPTS} "https://api.github.com/repos/${repo}/releases?per_page=10" 2>/dev/null) || {
+        echo -e "${RED}Не удалось получить список релизов с GitHub${NC}"
+        PAUSE
+        return
+    }
+
+    release_list=$(echo "$releases_json" | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4 | sort -Vr)
+
+    if [ -z "$release_list" ]; then
+        echo -e "${RED}Не удалось получить список релизов${NC}"
+        PAUSE
+        return
+    fi
+
+    latest_stable=$(echo "$release_list" | head -n1)
+
+    echo -e " \n${CYAN}Доступные релизы:${NC}\n"
+
+    i=1
+    unset tag1 tag2 tag3 tag4 tag5 tag6 tag7 tag8 tag9 tag10 2> /dev/null || true
+
+    #printf " ${DIM}%2s)${NC} ${MAGENTA}%-20s${NC} %s\n" "№" "Тег версии" "Статус"
+
+    for tag in $release_list; do
+        [ -z "$tag" ] && continue
+        #status="${GREEN}stable${NC}"
+        printf " ${CYAN}%2d)${NC} ${BOLD}%-20s${NC} %b\n" "$i" "$tag" #"$status"
+        eval "tag${i}=\"${tag}\""
+        i=$((i + 1))
+        [ $i -gt 10 ] && break
+    done
+
+    echo -e " \n${DIM}Введи номер или нажми Enter для последней версии${NC}\n"
+
+    echo -ne "${CYAN}Версия${NC} ${BOLD}[${latest_stable}]${NC}: "
+    read -r input_release
+
+    if [ -z "$input_release" ]; then
+        selected_tag="$latest_stable"
+    elif echo "$input_release" | grep -q '^[0-9]\+$'; then
+        eval "selected_tag=\"\${tag${input_release}:-${latest_stable}}\""
+    else
+        selected_tag="$input_release"
+    fi
+
+    if [ -z "${selected_tag}" ]; then
+        echo -e "\n${RED}Не удалось получить последнюю версию${NC}"
+        PAUSE
+        return
+    fi
+
+    local download_url="https://github.com/${repo}/releases/download/${selected_tag}/${arch_file}"
+
+    echo -e "\n${CYAN}Скачиваем${NC} ${BOLD}${arch_file} [${selected_tag}]${NC}"
+
+    if [ "${version}" = "rs" ]; then
+        curl ${CURL_OPTS} -o "${tmp_archive}" "${download_url}" || {
+            echo -e "\n${RED}Ошибка скачивания${NC}"
+            PAUSE
+            return
+        }
+
+        rm -rf "${tmp_dir}"
+        mkdir -p "${tmp_dir}"
+        tar -xzf "${tmp_archive}" -C "${tmp_dir}" || {
+            echo -e "\n${RED}Ошибка распаковки${NC}"
+            PAUSE
+            return
+        }
+
+        mv "${tmp_dir}"/tg-ws-proxy* "${bin_path}" 2> /dev/null || true
+
+        if [ ! -f "${bin_path}" ]; then
+            echo "Ошибка установки бинарника"
+            PAUSE
+            return
+        fi
+
+        rm -rf "${tmp_dir}" "${tmp_archive}"
+    else
+        rm -f "${tmp_bin}"
+        curl ${CURL_OPTS} -o "${tmp_bin}" "${download_url}" || {
+            echo -e "\n${RED}Ошибка скачивания${NC}"
+            PAUSE
+            return
+        }
+        chmod +x "${tmp_bin}"
+        mv "${tmp_bin}" "${bin_path}" 2> /dev/null || true
+    fi
+
+    chmod +x "${bin_path}" || true
+
+    if [ "${is_update}" = "1" ]; then
+        if [ "${mtproto_mode}" = "1" ]; then
             secret="$(get_current_secret "${version}")"
-            [ -z "${secret}" ] && secret="$(head -c16 /dev/urandom | hexdump -e '16/1 "%02x"')"
+            if [ -z "${secret}" ]; then
+                [ "${version}" = "go" ] && secret="dd$(gen_secret)" || secret="$(gen_secret)"
+            fi
         fi
         cf_domain="$(get_cf_domain "${version}")"
         cf_priority="$(get_cf_priority "${version}")"
     else
-        if [ "${version}" = "rs" ]; then
-            secret="$(head -c16 /dev/urandom | hexdump -e '16/1 "%02x"')"
+        if [ "${version}" = "go" ]; then
+            echo -e "\n${CYAN}1)${NC}${BOLD} Установить в режиме SOCKS5${NC}"
+            echo -e "${CYAN}2)${NC}${BOLD} Установить в режиме MTProto${NC}"
+            echo -e "\n${CYAN}Enter)${BOLD} Отмена${NC}\n"
+            echo -en "${YELLOW}Выбери действие: ${NC}"
+            read -r go_mode_select
+
+            case "${go_mode_select}" in
+                1)
+                    secret=""
+                    ;;
+                2)
+                    secret="dd$(gen_secret)"
+                    ;;
+                *)
+                    PAUSE
+                    return
+                    ;;
+            esac
+        else
+            secret="$(gen_secret)"
         fi
 
         # Включаем Cloudflare proxy по умолчанию при установке если домены доступны
@@ -519,53 +647,9 @@ install_or_update_tgws() {
         fi
     fi
 
-
-    if [ -z "${latest_tag}" ]; then
-        echo -e "\n${RED}Не удалось получить последнюю версию${NC}"
-        PAUSE
-        return 1
-    fi
-
-    echo -e "${CYAN}Скачиваем${NC} ${BOLD}${arch_file} (${latest_tag})${NC}"
-
-    if [ "${version}" = "rs" ]; then
-        curl ${CURL_OPTS} -o "${tmp_archive}" "${download_url}" || {
-            echo -e "\n${RED}Ошибка скачивания${NC}"
-            PAUSE
-            return 1
-        }
-
-        rm -rf "${tmp_dir}"
-        mkdir -p "${tmp_dir}"
-        tar -xzf "${tmp_archive}" -C "${tmp_dir}" || {
-            echo -e "\n${RED}Ошибка распаковки${NC}"
-            PAUSE
-            return 1
-        }
-
-        mv "${tmp_dir}"/tg-ws-proxy* "${bin_path}" 2> /dev/null || true
-
-        if [ ! -f "${bin_path}" ]; then
-            echo "Ошибка установки бинарника"
-            PAUSE
-            return 1
-        fi
-
-        rm -rf "${tmp_dir}" "${tmp_archive}"
+    if [ "${version}" = "go" ]; then
+        [ -n "${secret}" ] && full_cmd="${full_cmd} ${mtproto_flag} --secret ${secret}" || true
     else
-        rm -f "${tmp_bin}"
-        curl ${CURL_OPTS} -o "${tmp_bin}" "${download_url}" || {
-            echo -e "\n${RED}Ошибка скачивания${NC}"
-            PAUSE
-            return 1
-        }
-        chmod +x "${tmp_bin}"
-        mv "${tmp_bin}" "${bin_path}" 2> /dev/null || true
-    fi
-
-    chmod +x "${bin_path}" || true
-
-    if [ "${version}" = "rs" ]; then
         full_cmd="${full_cmd} ${secret}"
     fi
 
@@ -578,12 +662,13 @@ install_or_update_tgws() {
 
     "${init_path}" enable > /dev/null 2>&1 || true
     "${init_path}" restart > /dev/null 2>&1 || true
+    sleep 1
 
     if pidof "${bin_name}" > /dev/null 2>&1; then
         local status_msg=$([ "${is_update}" = "1" ] && echo "обновлён" || echo "запущен")
-        echo -e "${GREEN}Сервис TG WS Proxy ${CYAN}${display_name}${NC} ${GREEN}успешно ${status_msg}${NC}"
+        echo -e "\n${GREEN}Сервис TG WS Proxy ${CYAN}${display_name}${NC} ${GREEN}успешно ${status_msg}${NC}"
     else
-        echo -e "${RED}Не удалось запустить сервис${NC}"
+        echo -e "\n${RED}Не удалось запустить сервис${NC}"    
     fi
 
     PAUSE
@@ -625,7 +710,7 @@ delete_tg_ws() {
     killall -q "${bin_name}" || true
     rm -f "${bin_path}" "${init_path}" || true
 
-    echo -e "${GREEN}TG WS Proxy ${display_name} ${GREEN}успешно удален${NC}"
+    echo -e "\n${GREEN}TG WS Proxy ${display_name} ${GREEN}успешно удален${NC}"
 
     PAUSE
     return
@@ -633,25 +718,21 @@ delete_tg_ws() {
 
 show_proxy_status() {
     local version="$1"
-    local bin_name bin_path init_path proxy_type proxy_port link_prefix display_name running
+    local bin_name bin_path init_path proxy_port display_name running cf_domain secret cf_pri
 
     case "${version}" in
         rs)
             bin_name="${BIN_NAME_RS}"
             bin_path="${BIN_PATH_RS}"
             init_path="${INIT_PATH_RS}"
-            proxy_type="MTProto"
             proxy_port="${PROXY_PORT_RS}"
-            link_prefix="tg://proxy?server=${LAN_IP}&port=${PROXY_PORT_RS}&secret=dd"
             display_name="${CYAN}[Rust]${NC}"
             ;;
         go)
             bin_name="${BIN_NAME_GO}"
             bin_path="${BIN_PATH_GO}"
             init_path="${INIT_PATH_GO}"
-            proxy_type="SOCKS5"
             proxy_port="${PROXY_PORT_GO}"
-            link_prefix="tg://socks?server=${LAN_IP}&port=${PROXY_PORT_GO}"
             display_name="${CYAN}[Go]${NC}"
             ;;
         *)
@@ -661,8 +742,9 @@ show_proxy_status() {
     esac
 
     if [ -f "${bin_path}" ] && [ -f "${init_path}" ]; then
-        local cf_domain="$(get_cf_domain "${version}")"
-        local cf_pri="$( [ "$(get_cf_priority "${version}")" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
+        cf_domain="$(get_cf_domain "${version}")"
+        cf_pri="$( [ "$(get_cf_priority "${version}")" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
+        secret="$(get_current_secret "${version}")"
 
         if pgrep -f "${bin_name}" > /dev/null 2>&1; then
             running=1
@@ -671,16 +753,20 @@ show_proxy_status() {
         fi
 
         echo -e "\n${MAGENTA}TG WS Proxy ${display_name}${NC}: $( [ "${running}" = "1" ] && echo "${GREEN}Работает${NC}" || echo "${RED}Остановлен${NC}" )"
-        echo -e "  ${YELLOW}Тип:${NC}  ${proxy_type}"
+        echo -e "  ${YELLOW}Тип:${NC}  $( [ -n "${secret}" ] && echo "MTProto" || echo "SOCKS5" )"
         echo -e "  ${YELLOW}Хост:${NC} ${LAN_IP}"
         echo -e "  ${YELLOW}Порт:${NC} ${proxy_port}"
 
-        if [ "${version}" = "rs" ]; then
-            local secret="$(get_current_secret "${version}")"
-            echo -e "  ${YELLOW}Ключ:${NC} dd${secret}"
-            echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}${link_prefix}${secret}${NC}"
+        if [ -n "${secret}" ]; then
+            if [ "${version}" = "rs" ]; then
+                echo -e "  ${YELLOW}Ключ:${NC} dd${secret}"
+                echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}tg://proxy?server=${LAN_IP}&port=${proxy_port}&secret=dd${secret}${NC}"
+            else
+                echo -e "  ${YELLOW}Ключ:${NC} ${secret}"
+                echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}tg://proxy?server=${LAN_IP}&port=${proxy_port}&secret=${secret}${NC}"
+            fi
         else
-            echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}${link_prefix}${NC}"
+            echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}tg://socks?server=${LAN_IP}&port=${proxy_port}${NC}"
         fi
 
         if [ -n "${cf_domain}" ]; then
@@ -689,11 +775,23 @@ show_proxy_status() {
             echo -e "  ${YELLOW}Приоритет Cloudflare:${NC} ${cf_pri}"
         fi
 
-        [ "${version}" = "rs" ] && INSTALLED_RS=1 && RUNNING_RS="${running}" || true
-        [ "${version}" = "go" ] && INSTALLED_GO=1 && RUNNING_GO="${running}" || true
-
+        if [ "${version}" = "rs" ]; then
+            INSTALLED_RS="1"
+            RUNNING_RS="${running}"
+            [ -n "${secret}" ] && MTPROTO_RS="1" || MTPROTO_RS="0"
+        elif [ "${version}" = "go" ]; then
+            INSTALLED_GO="1"
+            RUNNING_GO="${running}"
+            [ -n "${secret}" ] && MTPROTO_GO="1" || MTPROTO_GO="0"
+        fi
     else
-        [ "${version}" = "rs" ] && INSTALLED_RS=0 || INSTALLED_GO=0
+        if [ "${version}" = "rs" ]; then
+            INSTALLED_RS="0"
+            MTPROTO_RS="0"
+        elif [ "${version}" = "go" ]; then
+            INSTALLED_GO="0"
+            MTPROTO_GO="0"
+        fi
     fi
 }
 
@@ -754,7 +852,7 @@ main() {
         3)
             if [ "${INSTALLED_RS}" = "1" ]; then
                 [ "${RUNNING_RS}" = "1" ] && ${INIT_PATH_RS} stop > /dev/null 2>&1 || ${INIT_PATH_RS} start > /dev/null 2>&1
-                echo -e "${GREEN}TG WS Proxy ${CYAN}[Rust]${NC} $( [ "${RUNNING_RS}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
+                echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Rust]${NC} $( [ "${RUNNING_RS}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
                 PAUSE
                 return
             fi
@@ -771,7 +869,7 @@ main() {
         7)
             if [ "${INSTALLED_GO}" = "1" ]; then
                 [ "${RUNNING_GO}" = "1" ] && ${INIT_PATH_GO} stop > /dev/null 2>&1 || ${INIT_PATH_GO} start > /dev/null 2>&1
-                echo -e "${GREEN}TG WS Proxy ${CYAN}[Go]${NC} $( [ "${RUNNING_GO}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
+                echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Go]${NC} $( [ "${RUNNING_GO}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
                 PAUSE
                 return
             fi
