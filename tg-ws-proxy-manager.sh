@@ -46,7 +46,7 @@ BASE_CMD_GO="${BIN_PATH_GO} --host ${LISTEN_IP_GO} --port ${PROXY_PORT_GO}"
 
 # Создаем команду tpm
 if [ ! -x "/usr/bin/tpm" ] || ! grep -q "tg-ws-proxy-manager" /usr/bin/tpm 2> /dev/null; then
-    echo "sh <(wget --timeout= 10 -q -O - https://raw.githubusercontent.com/alekskomp/tg-ws-proxy-manager/refs/heads/main/tg-ws-proxy-manager.sh)" > /usr/bin/tpm || true
+    echo "sh <(wget --timeout=10 -q -O - https://raw.githubusercontent.com/alekskomp/tg-ws-proxy-manager/refs/heads/main/tg-ws-proxy-manager.sh)" > /usr/bin/tpm || true
     chmod +x /usr/bin/tpm || true
 fi
 
