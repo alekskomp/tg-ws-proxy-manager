@@ -23,6 +23,9 @@ DC_IP_4="149.154.167.220"
 # Домены Cloudflare proxy
 CF_DOMAINS_URL="https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
 
+ULIMIT_N_SOFT="8192"
+ULIMIT_N_HARD="16384"
+
 # Параметры TG WS Proxy [Rust]
 REPO_RS="valnesfjord/tg-ws-proxy-rs"
 BIN_NAME_RS="tg-ws-proxy-rs"
@@ -287,6 +290,7 @@ USE_PROCD=1
 start_service() {
     procd_open_instance
     procd_set_param command ${command_line}
+    procd_set_param limits nofile="${ULIMIT_N_SOFT} ${ULIMIT_N_HARD}"
     procd_set_param respawn
     procd_close_instance
 }
