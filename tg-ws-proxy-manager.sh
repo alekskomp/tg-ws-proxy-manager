@@ -75,6 +75,12 @@ PAUSE() {
     read -r -p "Нажми Enter..." dummy
 }
 
+# Ошибка
+ERROR() {
+    echo -e "\n${RED}Ошибка: $1${NC}" >&2
+    PAUSE
+}
+
 # Определяем пакетный менеджер
 if command -v opkg > /dev/null 2>&1; then
     PKG="opkg"
@@ -110,9 +116,8 @@ cf_decode_domains() {
     content=$(curl ${CURL_OPTS} "${CF_DOMAINS_URL}" 2> /dev/null)
 
     if [ -z "${content}" ]; then
-        echo -e "Ошибка: не удалось скачать список доменов\n" >&2
-        PAUSE
-        return
+        ERROR "Не удалось скачать список доменов"
+        return 1
     fi
 
     # Декодируем в обратном порядке
@@ -130,26 +135,23 @@ cf_decode_domains() {
 }
 
 cf_decode_single_domain() {
-    echo "$1" | awk '
+    echo "$1" | awk -v alphabet="abcdefghijklmnopqrstuvwxyz" -v ALPHABET="ABCDEFGHIJKLMNOPQRSTUVWXYZ" '
     /\.com$/ {
         p = substr($0, 1, length($0)-4)
-        n = 0
-        for(i=1;i<=length(p);i++) {
-            c = substr(p,i,1)
-            if (c ~ /[a-zA-Z]/) n++
-        }
+        n = gsub(/[a-zA-Z]/, "&", p)
         out = ""
         for(i=1;i<=length(p);i++) {
             c = substr(p,i,1)
-            if (c ~ /[a-z]/) {
-                v = (index("abcdefghijklmnopqrstuvwxyz",c)-1-n%26+26)%26
-                out = out substr("abcdefghijklmnopqrstuvwxyz",v+1,1)
-            } else if (c ~ /[A-Z]/) {
-                v = (index("ABCDEFGHIJKLMNOPQRSTUVWXYZ",c)-1-n%26+26)%26
-                out = out substr("ABCDEFGHIJKLMNOPQRSTUVWXYZ",v+1,1)
-            } else { out = out c }
+            idx = index(alphabet, tolower(c))
+            if (idx > 0) {
+                v = (idx-1-n%26+26)%26 + 1
+                out = out substr(c ~ /[a-z]/ ? alphabet : ALPHABET, v, 1)
+            } else {
+                out = out c
+            }
         }
-        print out ".co.uk"; next
+        print out ".co.uk"
+        next
     }
     { print }'
 }
@@ -169,8 +171,7 @@ get_current_secret() {
             [ -f "${init_path}" ] && sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{34\}\).*/\1/p' ${init_path}
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
@@ -189,8 +190,7 @@ get_cf_domain() {
             init_path="${INIT_PATH_GO}"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
@@ -215,8 +215,7 @@ get_cf_priority() {
             [ -f "${init_path}" ] && grep -q -- "--cf-proxy-first" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
@@ -230,18 +229,17 @@ get_cf_balance() {
     case "${version}" in
         rs)
             init_path="${INIT_PATH_RS}"
-            [ -f "${init_path}" ] && grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         go)
             init_path="${INIT_PATH_GO}"
-            [ -f "${init_path}" ] && grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
+
+    [ -f "${init_path}" ] && grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
 }
 
 # Определяем архитектуру
@@ -266,8 +264,7 @@ get_arch() {
                 echo "tg-ws-proxy-mips-unknown-linux-musl.tar.gz"
             ;;
             *)
-                echo -e "\n${RED}Архитектура не поддерживается: ${NC}${ARCH}"
-                PAUSE
+                ERROR "Архитектура не поддерживается: ${ARCH}"
                 return 1
             ;;
         esac
@@ -293,8 +290,7 @@ get_arch() {
             ;;
         esac
     else
-        echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-        PAUSE
+        ERROR "Неизвестная версия ${version}"
         return 1
     fi
 }
@@ -331,7 +327,7 @@ configure_cloudflare() {
         local cf_balance="0"
         local default_cf_domains="$(cf_decode_domains)"
         local current_cf_domain="$(get_cf_domain "${version}")"
-        local current_cf_prority="$(get_cf_priority "${version}")"
+        local current_cf_priority="$(get_cf_priority "${version}")"
         local current_cf_balance="$(get_cf_balance "${version}")"
 
         case "${version}" in
@@ -357,8 +353,7 @@ configure_cloudflare() {
                 mtproto_flag="${MTPROTO_FLAG_GO}"
                 ;;
             *)
-                echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-                PAUSE
+                ERROR "Неизвестная версия ${version}"
                 return 1
                 ;;
         esac
@@ -372,8 +367,8 @@ configure_cloudflare() {
         if [ -n "${current_cf_domain}" ]; then
             echo -e "${YELLOW}Cтатус:${NC} ${GREEN}Включен${NC}"
             echo -e "${YELLOW}Домены:${NC} ${current_cf_domain}"
-            echo -e "${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_prority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
-            [ "${version}" = "rs" ] && echo -e "${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}  " || echo "${RED}Выключена${NC}" )"
+            echo -e "${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_priority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
+            echo -e "${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}  " || echo "${RED}Выключена${NC}" )"
         else
             echo -e "${YELLOW}Cтатус:${NC} ${RED}Отключен${NC}"
         fi
@@ -381,8 +376,8 @@ configure_cloudflare() {
         echo -e "\n${CYAN}1)${NC}${BOLD} Включить с доменами по умолчанию${NC}"
         echo -e "${CYAN}2)${NC}${BOLD} Включить со своими доменами${NC}"
         if [ -n "${current_cf_domain}" ]; then
-            echo -e "${CYAN}3)${NC}${BOLD} $( [ "${current_cf_prority}" = "1" ] && echo "Выключить" || echo "Включить" ) приоритет Cloudflare${NC}"
-            [ "${version}" = "rs" ] && echo -e "${CYAN}4)${NC}${BOLD} $( [ "${current_cf_balance}" = "1" ] && echo "Выключить" || echo "Включить" ) балансировку доменов Cloudflare${NC}"
+            echo -e "${CYAN}3)${NC}${BOLD} $( [ "${current_cf_priority}" = "1" ] && echo "Выключить" || echo "Включить" ) приоритет Cloudflare${NC}"
+            echo -e "${CYAN}4)${NC}${BOLD} $( [ "${current_cf_balance}" = "1" ] && echo "Выключить" || echo "Включить" ) балансировку доменов Cloudflare${NC}"
             echo -e "${CYAN}5)${YELLOW} Выключить Cloudflare Proxy${NC}"
         fi
         echo -e "\n${CYAN}Enter) Отмена${NC}\n"
@@ -397,15 +392,14 @@ configure_cloudflare() {
                         cf_balance="1"
                     else
                         cf_balance="${current_cf_balance}"
-                        cf_priority="${current_cf_prority}"
+                        cf_priority="${current_cf_priority}"
                     fi
 
                     cf_domain="${default_cf_domains}"
                     echo -e "\n${GREEN}Выбраны домены по умолчанию${NC}"
                 else
-                    echo -e "\n${RED}Не удалось скачать домены по умолчанию${NC}"
-                    PAUSE
-                    break
+                    ERROR "Не удалось скачать домены по умолчанию"
+                    continue
                 fi
                 ;;
             2)
@@ -414,9 +408,8 @@ configure_cloudflare() {
                 input=$(echo "${input}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
                 if [ -z "${input}" ]; then
-                    echo -e "\n${RED}Домен не введен${NC}"
-                    PAUSE
-                    break
+                    ERROR "Домен не введен"
+                    continue
                 fi
 
                 if [ -z "${current_cf_domain}" ]; then
@@ -424,7 +417,7 @@ configure_cloudflare() {
                     cf_balance="1"
                 else
                     cf_balance="${current_cf_balance}"
-                    cf_priority="${current_cf_prority}"
+                    cf_priority="${current_cf_priority}"
                 fi
 
                 cf_domain="${input}"
@@ -432,12 +425,11 @@ configure_cloudflare() {
                 ;;
             3)
                 if [ -z "${current_cf_domain}" ]; then
-                    echo -e "\n${RED}Сначала включи Cloudflare Proxy (пункт 1 или 2)${NC}"
-                    PAUSE
-                    break
+                    ERROR "Сначала включи Cloudflare Proxy (пункт 1 или 2)"
+                    continue
                 fi
 
-                if [ "${current_cf_prority}" = "1" ]; then
+                if [ "${current_cf_priority}" = "1" ]; then
                     cf_priority="0"
                 else
                     cf_priority="1"
@@ -449,26 +441,19 @@ configure_cloudflare() {
                 ;;
             4)
                 if [ -z "${current_cf_domain}" ]; then
-                    echo -e "\n${RED}Сначала включи Cloudflare Proxy (пункт 1 или 2)${NC}"
-                    PAUSE
-                    break
+                    ERROR "Сначала включи Cloudflare Proxy (пункт 1 или 2)"
+                    continue
                 fi
 
-                if [ "${version}" = "rs" ];then
-                    if [ "${current_cf_balance}" = "1" ]; then
-                        cf_balance="0"
-                    else
-                        cf_balance="1"
-                    fi
-
-                    echo -e "\n${GREEN}Балансировка доменов Cloudflare $( [ "${cf_balance}" = "1" ] && echo "включена" || echo "выключена" )${NC}"
+                if [ "${current_cf_balance}" = "1" ]; then
+                    cf_balance="0"
                 else
-                    echo -e "\n${YELLOW}Балансировка доменов Cloudflare не поддерживается в версии ${CYAN}[Go]${NC}"
-                    PAUSE
-                    break
+                    cf_balance="1"
                 fi
+                echo -e "\n${GREEN}Балансировка доменов Cloudflare $( [ "${cf_balance}" = "1" ] && echo "включена" ||echo "выключена" )${NC}"
+
                 cf_domain="${current_cf_domain}"
-                cf_priority="${current_cf_prority}"
+                cf_priority="${current_cf_priority}"
                 ;;
             5)
                 if [ -n "${current_cf_domain}" ]; then
@@ -480,7 +465,7 @@ configure_cloudflare() {
                     cf_domain=""
                     echo -e "\n${YELLOW}Cloudflare Proxy и так отключен${NC}"
                     PAUSE
-                    break
+                    continue
                 fi
                 ;;
             *)
@@ -501,7 +486,7 @@ configure_cloudflare() {
         if [ -n "${cf_domain}" ]; then
             full_cmd="${full_cmd} ${cf_flag} ${cf_domain}"
             [ "${cf_priority}" = "1" ] && full_cmd="${full_cmd} ${cf_priority_flag}"
-            [ "${version}" = "rs" ] && [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
+            [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
         fi
 
         create_init_script "${init_path}" "${full_cmd}"
@@ -510,11 +495,10 @@ configure_cloudflare() {
 
         if wait_for_pid "${bin_name}" > /dev/null 2>&1; then
             echo -e "\n${GREEN}Настройки Cloudflare успешно применены и сервис перезапущен${NC}"
+            PAUSE
         else
-            echo -e "\n${RED}Не удалось запустить сервис после применения настроек${NC}"
+            ERROR "Не удалось запустить сервис после применения настроек"
         fi
-
-        PAUSE
     done
 }
 
@@ -568,8 +552,7 @@ install_or_update_tgws() {
             cf_balance_flag="${CF_BALANCE_FLAG_GO}"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия '${version}'${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
@@ -587,17 +570,15 @@ install_or_update_tgws() {
     fi
 
     releases_json=$(curl ${CURL_OPTS} "https://api.github.com/repos/${repo}/releases?per_page=10" 2>/dev/null) || {
-        echo -e "${RED}Не удалось получить список релизов с GitHub${NC}"
-        PAUSE
-        return
+        ERROR "Не удалось получить список релизов с GitHub"
+        return 1
     }
 
     release_list=$(echo "$releases_json" | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4 | sort -Vr)
 
     if [ -z "$release_list" ]; then
-        echo -e "${RED}Не удалось получить список релизов${NC}"
-        PAUSE
-        return
+        ERROR "Не удалось получить список релизов${NC}"
+        return 1
     fi
 
     latest_stable=$(echo "$release_list" | head -n1)
@@ -632,51 +613,11 @@ install_or_update_tgws() {
     fi
 
     if [ -z "${selected_tag}" ]; then
-        echo -e "\n${RED}Не удалось получить последнюю версию${NC}"
-        PAUSE
-        return
+        ERROR "Не удалось получить последнюю версию"
+        return 1
     fi
 
     local download_url="https://github.com/${repo}/releases/download/${selected_tag}/${arch_file}"
-
-    echo -e "\n${CYAN}Скачиваем${NC} ${BOLD}${arch_file} [${selected_tag}]${NC}"
-
-    if [ "${version}" = "rs" ]; then
-        curl ${CURL_OPTS} -o "${tmp_archive}" "${download_url}" || {
-            echo -e "\n${RED}Ошибка скачивания${NC}" >&2
-            PAUSE
-            return
-        }
-
-        rm -rf "${tmp_dir}"
-        mkdir -p "${tmp_dir}"
-        tar -xzf "${tmp_archive}" -C "${tmp_dir}" || {
-            echo -e "\n${RED}Ошибка распаковки${NC}" >&2
-            PAUSE
-            return
-        }
-
-        mv "${tmp_dir}"/tg-ws-proxy* "${bin_path}" 2> /dev/null
-
-        if [ ! -f "${bin_path}" ]; then
-            echo "Ошибка установки бинарника" >&2
-            PAUSE
-            return
-        fi
-
-        rm -rf "${tmp_dir}" "${tmp_archive}"
-    else
-        rm -f "${tmp_bin}"
-        curl ${CURL_OPTS} -o "${tmp_bin}" "${download_url}" || {
-            echo -e "\n${RED}Ошибка скачивания${NC}" >&2
-            PAUSE
-            return
-        }
-        chmod +x "${tmp_bin}"
-        mv "${tmp_bin}" "${bin_path}" 2> /dev/null
-    fi
-
-    chmod +x "${bin_path}"
 
     if [ "${is_update}" = "1" ]; then
         if [ "${mtproto_mode}" = "1" ]; then
@@ -689,41 +630,75 @@ install_or_update_tgws() {
         cf_priority="$(get_cf_priority "${version}")"
         cf_balance="$(get_cf_balance "${version}")"
     else
-        if [ "${version}" = "go" ]; then
-            echo -e "\n${CYAN}1)${NC}${BOLD} Установить в режиме SOCKS5${NC}"
-            echo -e "${CYAN}2)${NC}${BOLD} Установить в режиме MTProto${NC}"
-            echo -e "\n${CYAN}Enter)${BOLD} Отмена${NC}\n"
-            echo -en "${YELLOW}Выбери действие: ${NC}"
-            read -r go_mode_select
+            if [ "${version}" = "go" ]; then
+                echo -e "${CYAN}\nВыбери режим установки:${NC}"
+                echo -e "\n  ${CYAN}1)${NC}${BOLD} Установить в режиме MTProto${NC}"
+                echo -e "  ${CYAN}2)${NC}${BOLD} Установить в режиме SOCKS5${NC}"
+                echo -e "\n  ${CYAN}Enter)${BOLD} Отмена${NC}\n"
+                echo -en "${YELLOW}Выбери действие: ${NC}"
+                read -r go_mode_select
 
-            case "${go_mode_select}" in
-                1)
-                    secret=""
-                    ;;
-                2)
-                    secret="dd$(gen_secret)"
-                    ;;
-                *)
-                    echo -e "\n${RED}Режим установки не выбран${NC}"
-                    PAUSE
-                    return
-                    ;;
-            esac
-        else
-            secret="$(gen_secret)"
-        fi
+                case "${go_mode_select}" in
+                    1)
+                        secret="dd$(gen_secret)"
+                        ;;
+                    2)
+                        secret=""
+                        ;;
+                    *)
+                        return
+                        ;;
+                esac
+            else
+                secret="$(gen_secret)"
+            fi
 
         # Включаем Cloudflare proxy по умолчанию при установке если домены доступны
         if [ -n "${default_cf_domains}" ]; then
             cf_domain="${default_cf_domains}"
             cf_priority="1"
-            [ "${version}" = "rs" ] && cf_balance="1"
+            cf_balance="1"
         else
             cf_domain=""
             cf_priority="0"
             cf_balance="0"
         fi
     fi
+
+    echo -e "\n${CYAN}Скачиваем${NC} ${BOLD}${arch_file} [${selected_tag}]${NC}"
+
+    if [ "${version}" = "rs" ]; then
+        curl ${CURL_OPTS} -o "${tmp_archive}" "${download_url}" || {
+            ERROR "Ошибка скачивания${NC}"
+            return 1
+        }
+
+        rm -rf "${tmp_dir}"
+        mkdir -p "${tmp_dir}"
+        tar -xzf "${tmp_archive}" -C "${tmp_dir}" || {
+            ERROR "Ошибка распаковки"
+            return 1
+        }
+
+        mv "${tmp_dir}"/tg-ws-proxy* "${bin_path}" 2> /dev/null
+
+        if [ ! -f "${bin_path}" ]; then
+            ERROR "Ошибка установки бинарника"
+            return 1
+        fi
+
+        rm -rf "${tmp_dir}" "${tmp_archive}"
+    else
+        rm -f "${tmp_bin}"
+        curl ${CURL_OPTS} -o "${tmp_bin}" "${download_url}" || {
+            ERROR "Ошибка скачивания"
+            return 1
+        }
+        chmod +x "${tmp_bin}"
+        mv "${tmp_bin}" "${bin_path}" 2> /dev/null
+    fi
+
+    chmod +x "${bin_path}"
 
     if [ "${version}" = "go" ]; then
         [ -n "${secret}" ] && full_cmd="${full_cmd} ${mtproto_flag} --secret ${secret}"
@@ -734,7 +709,7 @@ install_or_update_tgws() {
     if [ -n "${cf_domain}" ]; then
         full_cmd="${full_cmd} ${cf_flag} ${cf_domain}"
         [ "${cf_priority}" = "1" ] && full_cmd="${full_cmd} ${cf_priority_flag}"
-        [ "${version}" = "rs" ] && [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
+        [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
     fi
 
     create_init_script "${init_path}" "${full_cmd}"
@@ -745,12 +720,11 @@ install_or_update_tgws() {
     if wait_for_pid "${bin_name}" > /dev/null 2>&1; then
         local status_msg=$([ "${is_update}" = "1" ] && echo "обновлён" || echo "запущен")
         echo -e "\n${GREEN}Сервис TG WS Proxy ${CYAN}${display_name}${NC} ${GREEN}успешно ${status_msg}${NC}"
+        PAUSE
     else
-        echo -e "\n${RED}Не удалось запустить сервис${NC}"
+        ERROR "Не удалось запустить сервис"
+        return 1
     fi
-
-    PAUSE
-    return
 }
 
 # Удаление TG WS proxy
@@ -772,8 +746,7 @@ delete_tg_ws() {
             display_name="${DISPLAY_NAME_GO}"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
-            PAUSE
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
@@ -796,7 +769,7 @@ delete_tg_ws() {
 
 show_proxy_status() {
     local version="$1"
-    local bin_name bin_path init_path proxy_port display_name running cf_domain secret current_cf_prority current_cf_balance
+    local bin_name bin_path init_path proxy_port display_name running cf_domain secret current_cf_priority current_cf_balance
 
     case "${version}" in
         rs)
@@ -814,18 +787,18 @@ show_proxy_status() {
             display_name="${CYAN}[Go]${NC}"
             ;;
         *)
-            echo -e "${RED}Ошибка: неизвестная версия ${version}${NC}" >&2
+            ERROR "Неизвестная версия ${version}"
             return 1
             ;;
     esac
 
     if [ -f "${bin_path}" ] && [ -f "${init_path}" ]; then
         cf_domain="$(get_cf_domain "${version}")"
-        current_cf_prority="$(get_cf_priority "${version}")"
+        current_cf_priority="$(get_cf_priority "${version}")"
         current_cf_balance="$(get_cf_balance "${version}")"
         secret="$(get_current_secret "${version}")"
 
-        if pgrep -f "${bin_name}" > /dev/null 2>&1; then
+        if pidof "${bin_name}" > /dev/null 2>&1; then
             running=1
         else
             running=0
@@ -851,8 +824,8 @@ show_proxy_status() {
         if [ -n "${cf_domain}" ]; then
             echo -e "  ${YELLOW}Cloudflare proxy: ${GREEN}Включен${NC}"
             echo -e "  ${YELLOW}Домены Cloudflare:${NC} ${cf_domain}"
-            echo -e "  ${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_prority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
-            [ "${version}" = "rs" ] && echo -e "  ${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}" || echo "${RED}Выключена${NC}" )"
+            echo -e "  ${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_priority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
+            echo -e "  ${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}" || echo "${RED}Выключена${NC}" )"
         fi
 
         if [ "${version}" = "rs" ]; then
@@ -887,8 +860,7 @@ main() {
     if ! command -v curl > /dev/null 2>&1; then
         echo -e "${CYAN}Устанавливаем curl${NC}"
         ${UPDATE} > /dev/null 2>&1 && ${INSTALL} curl > /dev/null 2>&1 || {
-            echo -e "\n${RED}Ошибка установки curl${NC}" >&2
-            PAUSE
+            ERROR "Ошибка установки curl"
             return 1
         }
     fi
@@ -924,38 +896,50 @@ main() {
 
     case ${choice} in
         1) 
-            install_or_update_tgws "rs" ${INSTALLED_RS}
+            install_or_update_tgws "rs" "${INSTALLED_RS}"
             ;;
         2)
-            [ "${INSTALLED_RS}" = "1" ] && configure_cloudflare "rs"
+            [ "${INSTALLED_RS}" = "1" ] && configure_cloudflare "rs" || ERROR "TG WS Proxy [Rust] не установлен"
             ;;
         3)
             if [ "${INSTALLED_RS}" = "1" ]; then
-                [ "${RUNNING_RS}" = "1" ] && ${INIT_PATH_RS} stop > /dev/null 2>&1 || ${INIT_PATH_RS} start > /dev/null 2>&1
-                echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Rust]${NC} $( [ "${RUNNING_RS}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
+                if [ "${RUNNING_RS}" = "1" ]; then
+                    ${INIT_PATH_RS} stop > /dev/null 2>&1 || true
+                    echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Rust]${NC} ${GREEN}остановлен${NC}"
+                else
+                    ${INIT_PATH_RS} start > /dev/null 2>&1 || true
+                    echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Rust]${NC} ${GREEN}запущен${NC}"
+                fi
                 PAUSE
-                return
+            else
+                ERROR "TG WS Proxy [Rust] не установлен"
             fi
             ;;
         4)
-            [ "${INSTALLED_RS}" = "1" ] && delete_tg_ws "rs"
+            [ "${INSTALLED_RS}" = "1" ] && delete_tg_ws "rs" || ERROR "TG WS Proxy [Rust] не установлен"
             ;;
         5) 
             install_or_update_tgws "go" "${INSTALLED_GO}"
             ;;
         6)
-            [ "${INSTALLED_GO}" = "1" ] && configure_cloudflare "go"
+            [ "${INSTALLED_GO}" = "1" ] && configure_cloudflare "go" || ERROR "TG WS Proxy [Go] не установлен"
             ;;
         7)
             if [ "${INSTALLED_GO}" = "1" ]; then
-                [ "${RUNNING_GO}" = "1" ] && ${INIT_PATH_GO} stop > /dev/null 2>&1 || ${INIT_PATH_GO} start > /dev/null 2>&1
-                echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Go]${NC} $( [ "${RUNNING_GO}" = "0" ] && echo "${GREEN}запущен${NC}" || echo "${GREEN}остановлен${NC}" )"
+                if [ "${RUNNING_GO}" = "1" ]; then
+                    ${INIT_PATH_GO} stop > /dev/null 2>&1 || true
+                    echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Go]${NC} ${GREEN}остановлен${NC}"
+                else
+                    ${INIT_PATH_GO} start > /dev/null 2>&1 || true
+                    echo -e "\n${GREEN}TG WS Proxy ${CYAN}[Go]${NC} ${GREEN}запущен${NC}"
+                fi
                 PAUSE
-                return
+            else
+                ERROR "TG WS Proxy [Go] не установлен"
             fi
             ;;
         8)
-            [ "${INSTALLED_GO}" = "1" ] && delete_tg_ws "go"
+            [ "${INSTALLED_GO}" = "1" ] && delete_tg_ws "go" || ERROR "TG WS Proxy [Go] не установлен"
             ;;
         *)
             exit 0
@@ -964,5 +948,5 @@ main() {
 }
 
 while true; do
-    main
+    main || break
 done
