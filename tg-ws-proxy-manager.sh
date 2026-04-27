@@ -758,7 +758,7 @@ delete_tg_ws() {
         "${init_path}" disable > /dev/null 2>&1 || true
     fi
 
-    killall -q "${bin_name}" || true
+    killall -q "${bin_name}"
     rm -f "${bin_path}" "${init_path}"
 
     echo -e "\n${GREEN}TG WS Proxy ${display_name} ${GREEN}успешно удален${NC}"
