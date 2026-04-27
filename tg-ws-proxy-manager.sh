@@ -764,7 +764,6 @@ delete_tg_ws() {
     echo -e "\n${GREEN}TG WS Proxy ${display_name} ${GREEN}успешно удален${NC}"
 
     PAUSE
-    return
 }
 
 show_proxy_status() {
