@@ -128,7 +128,7 @@ cf_decode_domains() {
         case "${domain}" in \#*) continue ;; esac
 
         decoded=$(cf_decode_single_domain "${domain}")
-        echo -n "${decoded},"
+        printf '%s,' "${decoded}"
     done | sed 's/,$//')
 
     echo "${decoded_list}"
@@ -557,7 +557,6 @@ install_or_update_tgws() {
             ;;
     esac
 
-    #local latest_tag="$(get_latest_tag "${repo}")"
     local full_cmd="${base_cmd}"
 
     clear
@@ -591,6 +590,8 @@ install_or_update_tgws() {
     #printf " ${DIM}%2s)${NC} ${MAGENTA}%-20s${NC} %s\n" "№" "Тег версии" "Статус"
 
     for tag in $release_list; do
+        [ -z "$tag" ] && continue
+        tag=$(echo "$tag" | tr -cd 'a-zA-Z0-9._-')
         [ -z "$tag" ] && continue
         #status="${GREEN}stable${NC}"
         printf " ${CYAN}%2d)${NC} ${BOLD}%-20s${NC} %b\n" "$i" "$tag" #"$status"
