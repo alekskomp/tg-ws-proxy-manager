@@ -156,30 +156,43 @@ cf_decode_single_domain() {
     { print }'
 }
 
-# Получаем secret из init файла
-get_current_secret() {
+# Получаем значение параметра запуска из init файла
+get_config_param_value() {
     local version="$1"
+    local param="$2"
     local init_path
 
     case "${version}" in
         rs)
             init_path="${INIT_PATH_RS}"
-            [ -f "${init_path}" ] && sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{32\}\).*/\1/p' ${init_path}
             ;;
         go)
             init_path="${INIT_PATH_GO}"
-            [ -f "${init_path}" ] && sed -n 's/.*--secret[[:space:]]*\([0-9a-fA-F]\{34\}\).*/\1/p' ${init_path}
             ;;
         *)
             ERROR "Неизвестная версия ${version}"
+            return 1
+            ;;
+    esac
+
+    case "${param}" in
+        cf-domain)
+            sed -n 's/.*--cf-domain[[:space:]]*\([^ ]*\).*/\1/p' "${init_path}"
+            ;;
+        secret)
+            sed -n 's/.*--secret[[:space:]]*\([^ ]*\).*/\1/p' "${init_path}"
+            ;;
+        *)
+            ERROR "Неизвестный параметр ${param}"
             return 1
             ;;
     esac
 }
 
-# Получаем домены Cloudflare из init файла
-get_cf_domain() {
+# Определяем наличие параметра запуска из init файла
+get_config_flag() {
     local version="$1"
+    local param="$2"
     local init_path
 
     case "${version}" in
@@ -195,51 +208,18 @@ get_cf_domain() {
             ;;
     esac
 
-    if [ -f "${init_path}" ]; then
-        sed -n 's/.*--cf-domain[[:space:]]*\([^ ]*\).*/\1/p' ${init_path}
-    fi
-}
-
-# Получаем приоритет Cloudflare из init файла
-get_cf_priority() {
-    local version="$1"
-    local init_path
-
-    case "${version}" in
-        rs)
-            init_path="${INIT_PATH_RS}"
-            [ -f "${init_path}" ] && grep -q -- "--cf-priority" ${init_path} 2> /dev/null && echo "1" || echo "0"
+    case "${param}" in
+        cf-priority)
+            grep -qE -- "--(cf-priority|cf-proxy-first)" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
-        go)
-            init_path="${INIT_PATH_GO}"
-            [ -f "${init_path}" ] && grep -q -- "--cf-proxy-first" ${init_path} 2> /dev/null && echo "1" || echo "0"
+        cf-balance)
+            grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         *)
-            ERROR "Неизвестная версия ${version}"
+            ERROR "Неизвестный параметр ${param}"
             return 1
             ;;
     esac
-}
-
-# Узнаем включен ли баланс доменов Cloudflare из init файла
-get_cf_balance() {
-    local version="$1"
-    local init_path
-
-    case "${version}" in
-        rs)
-            init_path="${INIT_PATH_RS}"
-            ;;
-        go)
-            init_path="${INIT_PATH_GO}"
-            ;;
-        *)
-            ERROR "Неизвестная версия ${version}"
-            return 1
-            ;;
-    esac
-
-    [ -f "${init_path}" ] && grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
 }
 
 # Определяем архитектуру
@@ -326,9 +306,9 @@ configure_cloudflare() {
         local cf_priority="0"
         local cf_balance="0"
         local default_cf_domains="$(cf_decode_domains)"
-        local current_cf_domain="$(get_cf_domain "${version}")"
-        local current_cf_priority="$(get_cf_priority "${version}")"
-        local current_cf_balance="$(get_cf_balance "${version}")"
+        local current_cf_domain="$(get_config_param_value "${version}" "cf-domain")"
+        local current_cf_priority="$(get_config_flag "${version}" "cf-priority")"
+        local current_cf_balance="$(get_config_flag "${version}" "cf-balance")"
 
         case "${version}" in
             rs)
@@ -474,7 +454,7 @@ configure_cloudflare() {
         esac
 
         if [ "${mtproto_mode}" = "1" ]; then
-            secret="$(get_current_secret "${version}")"
+            secret="$(get_config_param_value "${version}" "secret")"
 
             if [ "${version}" = "go" ]; then
                 [ -n "${secret}" ] && full_cmd="${full_cmd} ${mtproto_flag} --secret ${secret}"
@@ -622,14 +602,14 @@ install_or_update_tgws() {
 
     if [ "${is_update}" = "1" ]; then
         if [ "${mtproto_mode}" = "1" ]; then
-            secret="$(get_current_secret "${version}")"
+            secret="$(get_config_param_value "${version}" "secret")"
             if [ -z "${secret}" ]; then
                 [ "${version}" = "go" ] && secret="dd$(gen_secret)" || secret="$(gen_secret)"
             fi
         fi
-        cf_domain="$(get_cf_domain "${version}")"
-        cf_priority="$(get_cf_priority "${version}")"
-        cf_balance="$(get_cf_balance "${version}")"
+        cf_domain="$(get_config_param_value "${version}" "cf-domain")"
+        cf_priority="$(get_config_flag "${version}" "cf-priority")"
+        cf_balance="$(get_config_flag "${version}" "cf-balance")"
     else
             if [ "${version}" = "go" ]; then
                 echo -e "${CYAN}\nВыбери режим установки:${NC}"
@@ -793,10 +773,10 @@ show_proxy_status() {
     esac
 
     if [ -f "${bin_path}" ] && [ -f "${init_path}" ]; then
-        cf_domain="$(get_cf_domain "${version}")"
-        current_cf_priority="$(get_cf_priority "${version}")"
-        current_cf_balance="$(get_cf_balance "${version}")"
-        secret="$(get_current_secret "${version}")"
+        cf_domain="$(get_config_param_value "${version}" "cf-domain")"
+        current_cf_priority="$(get_config_flag "${version}" "cf-priority")"
+        current_cf_balance="$(get_config_flag "${version}" "cf-balance")"
+        secret="$(get_config_param_value "${version}" "secret")"
 
         if pidof "${bin_name}" > /dev/null 2>&1; then
             running=1
