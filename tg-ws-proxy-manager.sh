@@ -109,6 +109,11 @@ wait_for_pid() {
     return 1
 }
 
+# Валидация введенных доменов
+validate_domain() {
+    echo "$1" | grep -qE '^[a-zA-Z0-9.,-]+$'
+}
+
 # Скачиваем Cloudflare домены Flowseal
 cf_decode_domains() {
     local content decoded_list domain decoded
@@ -385,12 +390,19 @@ configure_cloudflare() {
             2)
                 echo -en "\n${YELLOW}Введи домены через запятую: ${NC}"
                 read -r input
-                input=$(echo "${input}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                input=$(echo "${input}" | sed 's/[[:space:]]//g')
 
                 if [ -z "${input}" ]; then
                     ERROR "Домен не введен"
                     continue
                 fi
+
+                for domain in "${input}"; do
+                    if ! validate_domain "${domain}"; then
+                        ERROR "Некорректный домен: ${domain}"
+                    continue 2
+                    fi
+                done
 
                 if [ -z "${current_cf_domain}" ]; then
                     cf_priority="1"
