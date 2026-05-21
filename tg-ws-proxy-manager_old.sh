@@ -20,6 +20,9 @@ LAN_IP=$(uci get network.lan.ipaddr 2> /dev/null | cut -d/ -f1)
 DC_IP_2="149.154.167.220"
 DC_IP_4="149.154.167.220"
 
+# Домены Cloudflare proxy
+CF_DOMAINS_URL="https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
+
 ULIMIT_N_SOFT="8192"
 ULIMIT_N_HARD="16384"
 
@@ -33,8 +36,9 @@ TMP_DIR_RS="/tmp/${BIN_NAME_RS}"
 PROXY_PORT_RS="2443"
 LISTEN_IP_RS="0.0.0.0"
 DISPLAY_NAME_RS="[Rust]"
-CF_DEFAULT_DOMAINS_FLAG_RS="--default-domains"
+CF_FLAG_RS="--cf-domain"
 CF_PRIORITY_FLAG_RS="--cf-priority"
+CF_BALANCE_FLAG_RS="--cf-balance"
 BASE_CMD_RS="${BIN_PATH_RS} -q --host ${LISTEN_IP_RS} --port ${PROXY_PORT_RS} --dc-ip 2:${DC_IP_2} --dc-ip 4:${DC_IP_4} --secret"
 
 # Параметры TG WS Proxy [Go]
@@ -46,14 +50,11 @@ TMP_BIN_GO="/tmp/${BIN_NAME_GO}"
 PROXY_PORT_GO="1080"
 LISTEN_IP_GO="0.0.0.0"
 DISPLAY_NAME_GO="[Go]"
-CF_FLAG_GO="--cf-proxy"
+CF_FLAG_GO="--cf-proxy --cf-domain"
 CF_PRIORITY_FLAG_GO="--cf-proxy-first"
+CF_BALANCE_FLAG_GO="--cf-balance"
 MTPROTO_FLAG_GO="--mode mtproto"
 BASE_CMD_GO="${BIN_PATH_GO} --host ${LISTEN_IP_GO} --port ${PROXY_PORT_GO}"
-
-CF_BALANCE_FLAG="--cf-balance"
-CF_DOMAIN_FLAG="--cf-domain"
-CF_WORKER_FLAG="--cf-worker-domain"
 
 INSTALLED_RS="0"
 INSTALLED_GO="0"
@@ -102,9 +103,8 @@ gen_secret() {
 wait_for_pid() {
     local name="$1" timeout=5 i=0
     while [ $i -lt $timeout ]; do
-        sleep 1
         pidof "$name" > /dev/null 2>&1 && return 0
-        i=$((i+1))
+        sleep 1; i=$((i+1))
     done
     return 1
 }
@@ -112,6 +112,53 @@ wait_for_pid() {
 # Валидация введенных доменов
 validate_domain() {
     echo "$1" | grep -qE '^[a-zA-Z0-9.,-]+$'
+}
+
+# Скачиваем Cloudflare домены Flowseal
+cf_decode_domains() {
+    local content decoded_list domain decoded
+
+    content=$(curl ${CURL_OPTS} "${CF_DOMAINS_URL}" 2> /dev/null)
+
+    if [ -z "${content}" ]; then
+        ERROR "Не удалось скачать список доменов"
+        return 1
+    fi
+
+    # Декодируем в обратном порядке
+    decoded_list=$(printf '%s\n' "${content}" | sed '1!G;h;$!d' | while IFS= read -r line; do
+    #decoded_list=$(printf '%s\n' "${content}" | while IFS= read -r line; do # Прямой порядок
+        domain=$(echo "$line" | tr -d '\r' | xargs)
+        [ -z "${domain}" ] && continue
+        case "${domain}" in \#*) continue ;; esac
+
+        decoded=$(cf_decode_single_domain "${domain}")
+        printf '%s,' "${decoded}"
+    done | sed 's/,$//')
+
+    echo "${decoded_list}"
+}
+
+cf_decode_single_domain() {
+    echo "$1" | awk -v alphabet="abcdefghijklmnopqrstuvwxyz" -v ALPHABET="ABCDEFGHIJKLMNOPQRSTUVWXYZ" '
+    /\.com$/ {
+        p = substr($0, 1, length($0)-4)
+        n = gsub(/[a-zA-Z]/, "&", p)
+        out = ""
+        for(i=1;i<=length(p);i++) {
+            c = substr(p,i,1)
+            idx = index(alphabet, tolower(c))
+            if (idx > 0) {
+                v = (idx-1-n%26+26)%26 + 1
+                out = out substr(c ~ /[a-z]/ ? alphabet : ALPHABET, v, 1)
+            } else {
+                out = out c
+            }
+        }
+        print out ".co.uk"
+        next
+    }
+    { print }'
 }
 
 # Получаем значение параметра запуска из init файла
@@ -136,9 +183,6 @@ get_config_param_value() {
     case "${param}" in
         cf-domain)
             sed -n 's/.*--cf-domain[[:space:]]*\([^ ]*\).*/\1/p' "${init_path}"
-            ;;
-        cf-worker-domain)
-            sed -n -E 's/.*--(cf-worker-domain|cfproxy-worker-domain)[[:space:]]+([^[:space:]]+).*/\2/p' "${init_path}"
             ;;
         secret)
             sed -n 's/.*--secret[[:space:]]*\([^ ]*\).*/\1/p' "${init_path}"
@@ -170,55 +214,17 @@ get_config_flag() {
     esac
 
     case "${param}" in
-        cf-enable)
-            grep -qE -- "--cf-proxy" ${init_path} 2> /dev/null && echo "1" || echo "0"
-            ;;
         cf-priority)
             grep -qE -- "--(cf-priority|cf-proxy-first)" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
         cf-balance)
             grep -q -- "--cf-balance" ${init_path} 2> /dev/null && echo "1" || echo "0"
             ;;
-        cf-default-domains)
-            grep -qE -- "--default-domains" ${init_path} 2> /dev/null && echo "1" || echo "0"
-            ;;
-        cf-domain-flag)
-            grep -qE -- "--cf-domain" ${init_path} 2> /dev/null && echo "1" || echo "0"
-            ;;
-        cf-worker-flag)
-            grep -qE -- "--(cf-worker-domain|cfproxy-worker-domain)" ${init_path} 2> /dev/null && echo "1" || echo "0"
-            ;;
         *)
             ERROR "Неизвестный параметр ${param}"
             return 1
             ;;
     esac
-}
-
-build_cmd_args() {
-    local version="$1"
-    local cf_enable="$2"
-    local cf_default_domains="$3"
-    local cf_domain="$4"
-    local cf_priority="$5"
-    local cf_balance="$6"
-    local cf_worker="$7"
-    local cf_worker_domain="$8"
-
-    [ "${cf_enable}" != "1" ] && return 0
-
-    local args=""
-
-    [ "${version}" = "go" ] && args="${args} ${CF_FLAG_GO}"
-    if [ "${cf_default_domains}" = "1" ]; then
-        [ "${version}" = "rs" ] && args="${args} ${CF_DEFAULT_DOMAINS_FLAG_RS}"
-    fi
-    [ -n "${cf_domain}" ] && args="${args} ${CF_DOMAIN_FLAG} ${cf_domain}"
-    [ "${cf_priority}" = "1" ] && args="${args} ${cf_priority_flag}"
-    [ "${cf_balance}" = "1" ] && args="${args} ${CF_BALANCE_FLAG}"
-    [ "${cf_worker}" = "1" ] && args="${args} ${CF_WORKER_FLAG} ${cf_worker_domain}"
-
-    echo "${args}"
 }
 
 # Определяем архитектуру
@@ -301,17 +307,13 @@ EOF
 configure_cloudflare() {
     while true; do
         local version="$1"
-        local display_name bin_name init_path base_cmd cf_priority_flag cf_worker_domain cf_domain current_cf_enable current_cf_default_domains_flag secret mtproto_mode mtproto_flag 
-        local cf_enable="0"
+        local display_name bin_name init_path base_cmd cf_flag cf_priority_flag cf_balance_flag cf_domain secret mtproto_mode mtproto_flag
         local cf_priority="0"
         local cf_balance="0"
-        local cf_default_domains="0"
-        local cf_worker="0"
+        local default_cf_domains="$(cf_decode_domains)"
         local current_cf_domain="$(get_config_param_value "${version}" "cf-domain")"
         local current_cf_priority="$(get_config_flag "${version}" "cf-priority")"
         local current_cf_balance="$(get_config_flag "${version}" "cf-balance")"
-        local current_cf_worker_flag="$(get_config_flag "${version}" "cf-worker-flag")"
-        local current_cf_worker_domain="$(get_config_param_value "${version}" "cf-worker-domain")"
 
         case "${version}" in
             rs)
@@ -319,30 +321,21 @@ configure_cloudflare() {
                 bin_name="${BIN_NAME_RS}"
                 init_path="${INIT_PATH_RS}"
                 base_cmd="${BASE_CMD_RS}"
+                cf_flag="${CF_FLAG_RS}"
                 cf_priority_flag="${CF_PRIORITY_FLAG_RS}"
-                current_cf_default_domains_flag="$(get_config_flag "${version}" "cf-default-domains")"
+                cf_balance_flag="${CF_BALANCE_FLAG_RS}"
                 mtproto_mode="${MTPROTO_RS}"
-                if [ "${current_cf_default_domains_flag}" = "1" ] || [ -n "${current_cf_domain}" ]; then
-                    current_cf_enable="1"
-                else
-                    current_cf_enable="0"
-                fi
                 ;;
             go)
                 display_name="${DISPLAY_NAME_GO}"
                 bin_name="${BIN_NAME_GO}"
                 init_path="${INIT_PATH_GO}"
                 base_cmd="${BASE_CMD_GO}"
+                cf_flag="${CF_FLAG_GO}"
                 cf_priority_flag="${CF_PRIORITY_FLAG_GO}"
+                cf_balance_flag="${CF_BALANCE_FLAG_GO}"
                 mtproto_mode="${MTPROTO_GO}"
                 mtproto_flag="${MTPROTO_FLAG_GO}"
-                current_cf_enable="$(get_config_flag "${version}" "cf-enable")"
-                current_cf_domain_flag="$(get_config_flag "${version}" "cf-domain-flag")"
-                if [ "${current_cf_enable}" = "1" ] && [ "${current_cf_domain_flag}" = "0" ]; then
-                    current_cf_default_domains_flag="1"
-                else
-                    current_cf_default_domains_flag="0"
-                fi
                 ;;
             *)
                 ERROR "Неизвестная версия ${version}"
@@ -356,23 +349,21 @@ configure_cloudflare() {
 
         echo -e "\n${MAGENTA}Настройка Cloudflare Proxy ${CYAN}${display_name}${NC}\n"
 
-        if [ "${current_cf_enable}" = "1" ]; then
+        if [ -n "${current_cf_domain}" ]; then
             echo -e "${YELLOW}Cтатус:${NC} ${GREEN}Включен${NC}"
-            [ -n "${current_cf_domain}" ] && echo -e "${YELLOW}Домены:${NC} ${current_cf_domain}" || echo -e "${YELLOW}Домены:${NC} по умолчанию"
+            echo -e "${YELLOW}Домены:${NC} ${current_cf_domain}"
             echo -e "${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_priority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
             echo -e "${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}  " || echo "${RED}Выключена${NC}" )"
-            echo -e "${YELLOW}Домен Cloudflare Worker:${NC} $( [ "${current_cf_worker_flag}" = "1" ] && echo "${GREEN}Включен${NC} (${current_cf_worker_domain})" || echo "${RED}Выключен${NC}")"
         else
             echo -e "${YELLOW}Cтатус:${NC} ${RED}Отключен${NC}"
         fi
 
         echo -e "\n${CYAN}1)${NC}${BOLD} Включить с доменами по умолчанию${NC}"
         echo -e "${CYAN}2)${NC}${BOLD} Включить со своими доменами${NC}"
-        if [ "${current_cf_enable}" = "1" ]; then
+        if [ -n "${current_cf_domain}" ]; then
             echo -e "${CYAN}3)${NC}${BOLD} $( [ "${current_cf_priority}" = "1" ] && echo "Выключить" || echo "Включить" ) приоритет Cloudflare${NC}"
             echo -e "${CYAN}4)${NC}${BOLD} $( [ "${current_cf_balance}" = "1" ] && echo "Выключить" || echo "Включить" ) балансировку доменов Cloudflare${NC}"
-            echo -e "${CYAN}5)${NC}${BOLD} $( [ "${current_cf_worker_flag}" = "1" ] && echo "Выключить" || echo "Включить" ) домен Cloudflare Worker${NC}"
-            echo -e "${CYAN}6)${YELLOW} Выключить Cloudflare Proxy${NC}"
+            echo -e "${CYAN}5)${YELLOW} Выключить Cloudflare Proxy${NC}"
         fi
         echo -e "\n${CYAN}Enter) Отмена${NC}\n"
         echo -en "${YELLOW}Выбери действие: ${NC}"
@@ -380,20 +371,21 @@ configure_cloudflare() {
 
         case ${choice} in
             1)
-                if [ "${current_cf_enable}" = "1" ]; then
-                    cf_balance="${current_cf_balance}"
-                    cf_priority="${current_cf_priority}"
-                else
-                    cf_balance="1"
-                    cf_priority="1"
-                fi
+                if [ -n "${default_cf_domains}" ]; then
+                    if [ -z "${current_cf_domain}" ]; then
+                        cf_priority="1"
+                        cf_balance="1"
+                    else
+                        cf_balance="${current_cf_balance}"
+                        cf_priority="${current_cf_priority}"
+                    fi
 
-                cf_enable="1"
-                cf_domain=""
-                cf_default_domains="1"
-                cf_worker="${current_cf_worker_flag}"
-                cf_worker_domain="${current_cf_worker_domain}"
-                echo -e "\n${GREEN}Выбраны домены по умолчанию${NC}"
+                    cf_domain="${default_cf_domains}"
+                    echo -e "\n${GREEN}Выбраны домены по умолчанию${NC}"
+                else
+                    ERROR "Не удалось скачать домены по умолчанию"
+                    continue
+                fi
                 ;;
             2)
                 echo -en "\n${YELLOW}Введи домены через запятую: ${NC}"
@@ -405,28 +397,26 @@ configure_cloudflare() {
                     continue
                 fi
 
-                if ! validate_domain "${input}"; then
-                    ERROR "Некорректные символы в доменах"
-                    continue
-                fi
+                for domain in "${input}"; do
+                    if ! validate_domain "${domain}"; then
+                        ERROR "Некорректный домен: ${domain}"
+                    continue 2
+                    fi
+                done
 
-                if [ "${current_cf_enable}" = "1" ]; then
+                if [ -z "${current_cf_domain}" ]; then
+                    cf_priority="1"
+                    cf_balance="1"
+                else
                     cf_balance="${current_cf_balance}"
                     cf_priority="${current_cf_priority}"
-                else
-                    cf_balance="1"
-                    cf_priority="1"
                 fi
 
-                cf_enable="1"
-                cf_default_domains="0"
-                cf_worker="${current_cf_worker_flag}"
-                cf_worker_domain="${current_cf_worker_domain}"
                 cf_domain="${input}"
                 echo -e "\n${GREEN}Домены сохранены${NC}"
                 ;;
             3)
-                if [ "${current_cf_enable}" = "0" ]; then
+                if [ -z "${current_cf_domain}" ]; then
                     ERROR "Сначала включи Cloudflare Proxy (пункт 1 или 2)"
                     continue
                 fi
@@ -437,16 +427,12 @@ configure_cloudflare() {
                     cf_priority="1"
                 fi
 
-                cf_enable="1"
-                cf_default_domains="${current_cf_default_domains_flag}"
                 cf_domain="${current_cf_domain}"
                 cf_balance="${current_cf_balance}"
-                cf_worker="${current_cf_worker_flag}"
-                cf_worker_domain="${current_cf_worker_domain}"
                 echo -e "\n${GREEN}Приоритет Cloudflare $( [ "${cf_priority}" = "1" ] && echo "включен" || echo "выключен" )${NC}"
                 ;;
             4)
-                if [ "${current_cf_enable}" = "0" ]; then
+                if [ -z "${current_cf_domain}" ]; then
                     ERROR "Сначала включи Cloudflare Proxy (пункт 1 или 2)"
                     continue
                 fi
@@ -458,56 +444,17 @@ configure_cloudflare() {
                 fi
                 echo -e "\n${GREEN}Балансировка доменов Cloudflare $( [ "${cf_balance}" = "1" ] && echo "включена" ||echo "выключена" )${NC}"
 
-                cf_enable="1"
-                cf_default_domains="${current_cf_default_domains_flag}"
                 cf_domain="${current_cf_domain}"
                 cf_priority="${current_cf_priority}"
-                cf_worker="${current_cf_worker_flag}"
-                cf_worker_domain="${current_cf_worker_domain}"
                 ;;
             5)
-                if [ "${current_cf_enable}" = "0" ]; then
-                    ERROR "Сначала включи Cloudflare Proxy (пункт 1 или 2)"
-                    continue
-                fi
-
-                if [ "${current_cf_worker_flag}" = "1" ]; then
-                    cf_worker="0"
-                    cf_worker_domain=""
-                else
-                    echo -en "\n${YELLOW}Введи домен worker-a: ${NC}"
-                    read -r input
-                    input=$(echo "${input}" | sed 's/[[:space:]]//g')
-                    if [ -z "${input}" ]; then
-                        ERROR "Домен не введен"
-                        continue
-                    fi
-                    if ! validate_domain "${input}"; then
-                        ERROR "Некорректные символы в домене"
-                        continue
-                    fi
-                    cf_worker="1"
-                    cf_worker_domain="${input}"
-                fi
-                cf_enable="1"
-                cf_default_domains="${current_cf_default_domains_flag}"
-                cf_balance="${current_cf_balance}"
-                cf_domain="${current_cf_domain}"
-                cf_priority="${current_cf_priority}"
-                ;;
-            6)
-                if [ "${current_cf_enable}" = "1" ]; then
-                    cf_enable="0"
-                    cf_default_domains="0"
+                if [ -n "${current_cf_domain}" ]; then
                     cf_domain=""
                     cf_priority="0"
                     cf_balance="0"
-                    cf_worker="0"
-                    cf_worker_domain=""
                     echo -e "\n${GREEN}Cloudflare Proxy отключен${NC}"
                 else
-                    #cf_enable="0"
-                    #cf_domain=""
+                    cf_domain=""
                     echo -e "\n${YELLOW}Cloudflare Proxy и так отключен${NC}"
                     PAUSE
                     continue
@@ -528,8 +475,11 @@ configure_cloudflare() {
             fi
         fi
 
-        cf_args=$(build_cmd_args "${version}" "${cf_enable}" "${cf_default_domains}" "${cf_domain}" "${cf_priority}" "${cf_balance}" "${cf_worker}" "${cf_worker_domain}")
-        full_cmd="${full_cmd}${cf_args}"
+        if [ -n "${cf_domain}" ]; then
+            full_cmd="${full_cmd} ${cf_flag} ${cf_domain}"
+            [ "${cf_priority}" = "1" ] && full_cmd="${full_cmd} ${cf_priority_flag}"
+            [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
+        fi
 
         create_init_script "${init_path}" "${full_cmd}"
 
@@ -548,16 +498,13 @@ configure_cloudflare() {
 install_or_update_tgws() {
     local version="$1"
     local is_update="${2:-0}"
-    local display_name repo bin_name bin_path init_path base_cmd cf_priority_flag mtproto_mode mtproto_flag tmp_archive tmp_dir tmp_bin cf_domain current_cf_enable current_cf_worker_domain cf_worker_domain current_cf_default_domains_flag
+    local display_name repo bin_name bin_path init_path base_cmd cf_flag cf_priority_flag cf_balance_flag mtproto_mode mtproto_flag tmp_archive tmp_dir tmp_bin cf_domain
     local secret=""
-    local cf_enable="0"
     local cf_priority="0"
     local cf_balance="0"
-    local cf_default_domains="0"
-    local cf_worker="0"
-    local current_cf_domain="$(get_config_param_value "${version}" "cf-domain")"
-    local current_cf_worker_flag="$(get_config_flag "${version}" "cf-worker-flag")"
+    local default_cf_domains="$(cf_decode_domains)"
     local arch_file="$(get_arch "${version}")"
+
     local releases_json
     local release_list
     local latest_stable=""
@@ -578,13 +525,9 @@ install_or_update_tgws() {
             tmp_dir="${TMP_DIR_RS}"
             base_cmd="${BASE_CMD_RS}"
             mtproto_mode="${MTPROTO_RS}"
+            cf_flag="${CF_FLAG_RS}"
             cf_priority_flag="${CF_PRIORITY_FLAG_RS}"
-            current_cf_default_domains_flag="$(get_config_flag "${version}" "cf-default-domains")"
-            if [ "${current_cf_default_domains_flag}" = "1" ] || [ -n "${current_cf_domain}" ]; then
-                current_cf_enable="1"
-            else
-                current_cf_enable="0"
-            fi
+            cf_balance_flag="${CF_BALANCE_FLAG_RS}"
             ;;
         go)
             display_name="${DISPLAY_NAME_GO}"
@@ -596,14 +539,9 @@ install_or_update_tgws() {
             base_cmd="${BASE_CMD_GO}"
             mtproto_mode="${MTPROTO_GO}"
             mtproto_flag="${MTPROTO_FLAG_GO}"
+            cf_flag="${CF_FLAG_GO}"
             cf_priority_flag="${CF_PRIORITY_FLAG_GO}"
-            current_cf_enable="$(get_config_flag "${version}" "cf-enable")"
-            current_cf_domain_flag="$(get_config_flag "${version}" "cf-domain-flag")"
-            if [ "${current_cf_enable}" = "1" ] && [ "${current_cf_domain_flag}" = "0" ]; then
-                current_cf_default_domains_flag="1"
-            else
-                current_cf_default_domains_flag="0"
-            fi
+            cf_balance_flag="${CF_BALANCE_FLAG_GO}"
             ;;
         *)
             ERROR "Неизвестная версия ${version}"
@@ -630,7 +568,7 @@ install_or_update_tgws() {
     release_list=$(echo "$releases_json" | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4 | sort -Vr)
 
     if [ -z "$release_list" ]; then
-        ERROR "Не удалось получить список релизов"
+        ERROR "Не удалось получить список релизов${NC}"
         return 1
     fi
 
@@ -681,24 +619,9 @@ install_or_update_tgws() {
                 [ "${version}" = "go" ] && secret="dd$(gen_secret)" || secret="$(gen_secret)"
             fi
         fi
-        if [ "${current_cf_enable}" = "1" ]; then
-            cf_enable="1"
-            if [ "${current_cf_default_domains_flag}" = "1" ]; then
-                cf_default_domains="1"
-            else
-                cf_default_domains="0"
-            fi
-            if [ "${current_cf_worker_flag}" = "1" ]; then
-                cf_worker="1"
-                cf_worker_domain="$(get_config_param_value "${version}" "cf-worker-domain")"
-            else
-                cf_worker="0"
-                cf_worker_domain=""
-            fi
-            cf_domain="$(get_config_param_value "${version}" "cf-domain")"
-            cf_priority="$(get_config_flag "${version}" "cf-priority")"
-            cf_balance="$(get_config_flag "${version}" "cf-balance")"
-        fi
+        cf_domain="$(get_config_param_value "${version}" "cf-domain")"
+        cf_priority="$(get_config_flag "${version}" "cf-priority")"
+        cf_balance="$(get_config_flag "${version}" "cf-balance")"
     else
             if [ "${version}" = "go" ]; then
                 echo -e "${CYAN}\nВыбери режим установки:${NC}"
@@ -723,14 +646,16 @@ install_or_update_tgws() {
                 secret="$(gen_secret)"
             fi
 
-        # Включаем Cloudflare proxy по умолчанию при установке
-        cf_enable="1"
-        cf_default_domains="1"
-        cf_domain=""
-        cf_priority="1"
-        cf_balance="1"
-        cf_worker="0"
-        cf_worker_domain=""
+        # Включаем Cloudflare proxy по умолчанию при установке если домены доступны
+        if [ -n "${default_cf_domains}" ]; then
+            cf_domain="${default_cf_domains}"
+            cf_priority="1"
+            cf_balance="1"
+        else
+            cf_domain=""
+            cf_priority="0"
+            cf_balance="0"
+        fi
     fi
 
     echo -e "\n${CYAN}Скачиваем${NC} ${BOLD}${arch_file} [${selected_tag}]${NC}"
@@ -774,8 +699,11 @@ install_or_update_tgws() {
         full_cmd="${full_cmd} ${secret}"
     fi
 
-    cf_args=$(build_cmd_args "${version}" "${cf_enable}" "${cf_default_domains}" "${cf_domain}" "${cf_priority}" "${cf_balance}" "${cf_worker}" "${cf_worker_domain}")
-    full_cmd="${full_cmd}${cf_args}"
+    if [ -n "${cf_domain}" ]; then
+        full_cmd="${full_cmd} ${cf_flag} ${cf_domain}"
+        [ "${cf_priority}" = "1" ] && full_cmd="${full_cmd} ${cf_priority_flag}"
+        [ "${cf_balance}" = "1" ] && full_cmd="${full_cmd} ${cf_balance_flag}"
+    fi
 
     create_init_script "${init_path}" "${full_cmd}"
 
@@ -833,9 +761,7 @@ delete_tg_ws() {
 
 show_proxy_status() {
     local version="$1"
-    local bin_name bin_path init_path proxy_port display_name running cf_domain cf_worker_domain secret current_cf_priority current_cf_balance current_cf_enable current_cf_default_domains_flag current_cf_domain current_cf_domain_flag
-
-
+    local bin_name bin_path init_path proxy_port display_name running cf_domain secret current_cf_priority current_cf_balance
 
     case "${version}" in
         rs)
@@ -859,52 +785,10 @@ show_proxy_status() {
     esac
 
     if [ -f "${bin_path}" ] && [ -f "${init_path}" ]; then
-        current_cf_domain="$(get_config_param_value "${version}" "cf-domain")"
-        current_cf_domain_flag="$(get_config_flag "${version}" "cf-domain-flag")"
+        cf_domain="$(get_config_param_value "${version}" "cf-domain")"
         current_cf_priority="$(get_config_flag "${version}" "cf-priority")"
         current_cf_balance="$(get_config_flag "${version}" "cf-balance")"
-        current_cf_worker_flag="$(get_config_flag "${version}" "cf-worker-flag")"
-        current_cf_worker_domain="$(get_config_param_value "${version}" "cf-worker-domain")"
         secret="$(get_config_param_value "${version}" "secret")"
-
-        case "${version}" in
-            rs)
-                current_cf_default_domains_flag="$(get_config_flag "${version}" "cf-default-domains")"
-                if [ "${current_cf_default_domains_flag}" = "1" ] || [ -n "${current_cf_domain}" ]; then
-                    current_cf_enable="1"
-                else
-                    current_cf_enable="0"
-                fi
-                ;;
-            go)
-                current_cf_enable="$(get_config_flag "${version}" "cf-enable")"
-                if [ "${current_cf_enable}" = "1" ] && [ "${current_cf_domain_flag}" = "0" ]; then
-                    current_cf_default_domains_flag="1"
-                else
-                    current_cf_default_domains_flag="0"
-                fi
-                ;;
-            *)
-                ERROR "Неизвестная версия ${version}"
-                return 1
-                ;;
-        esac
-
-        if [ "${current_cf_domain_flag}" = "1" ]; then
-            cf_domain="$(get_config_param_value "${version}" "cf-domain")"
-        else
-            if [ "${current_cf_default_domains_flag}" = "1" ]; then
-                cf_domain="по умолчанию"
-            else
-                cf_domain=""
-            fi
-        fi
-
-        if [ "${current_cf_worker_flag}" = "1" ]; then
-            cf_worker_domain=${current_cf_worker_domain}
-        else
-            cf_worker_domain=""
-        fi
 
         if pidof "${bin_name}" > /dev/null 2>&1; then
             running=1
@@ -929,12 +813,11 @@ show_proxy_status() {
             echo -e "  ${YELLOW}Ссылка:${NC} ${BOLD}tg://socks?server=${LAN_IP}&port=${proxy_port}${NC}"
         fi
 
-        if [ "${current_cf_enable}" = "1" ]; then
+        if [ -n "${cf_domain}" ]; then
             echo -e "  ${YELLOW}Cloudflare proxy: ${GREEN}Включен${NC}"
             echo -e "  ${YELLOW}Домены Cloudflare:${NC} ${cf_domain}"
             echo -e "  ${YELLOW}Приоритет Cloudflare:${NC} $( [ "${current_cf_priority}" = "1" ] && echo "${GREEN}Включен${NC}" || echo "${RED}Выключен${NC}" )"
             echo -e "  ${YELLOW}Балансировка доменов Cloudflare:${NC} $( [ "${current_cf_balance}" = "1" ] && echo "${GREEN}Включена${NC}" || echo "${RED}Выключена${NC}" )"
-            echo -e "  ${YELLOW}Домен Cloudflare Worker:${NC} $( [ "${current_cf_worker_flag}" = "1" ] && echo "${GREEN}Включен${NC} (${cf_worker_domain})" || echo "${RED}Выключен${NC}")"
         fi
 
         if [ "${version}" = "rs" ]; then
